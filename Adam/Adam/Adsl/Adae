@@ -1,0 +1,130 @@
+
+
+/*ADAM*/
+
+%let root = /home/u64371687/nadia_clinical_project;
+libname Raw "&root/Raw_data"; /* Source Data */
+libname SDTM "&root/SDTM_data"; /* Tabulation Data */
+libname QUERY "&root/QUERY"; /* Data Quality Checks */
+libname ADam "&root/ADam"; /* Analysis Data */
+
+/*************************************************************************
+* PROJECT: end to end clinical data standerdiztion and reporting pipeline
+* PROGRAM NAME: 02_ADaM_ADSL_Setup.sas
+* DESCRIPTION: Creation of Analysis Dataset Subject Level (ADSL)
+* METHOD: PROC SQL for Efficiency and Traceability
+*************************************************************************
+/* STEP 1: PREPARE EXPOSURE LIMITS (FIRST AND LAST DOSE) */
+
+proc sql;
+create table work.ex_limits as
+select USUBJID,EXTRT,
+min(input(EXSTDTC, yymmdd10.)) as TRTSDT format=yymmdd10. label="Treatment Start Date",
+max(input(EXENDTC, yymmdd10.)) as TRTEDT format=yymmdd10. label="Treatment End Date"
+from SDTM.ex_final
+group by USUBJID,EXTRT;
+quit;
+
+/* STEP 2: BUILD ADSL USING PROC SQL LEFT JOIN */
+
+proc sql;
+create table ADaM.adsl as
+select
+
+dm.*,
+ex.TRTSDT,
+ex.TRTEDT,
+ex.EXTRT as TRT01P length=20 label="Planned Treatment for Period 01",
+ds.DSDECOD as DSSTATUS label="Disposition Status",
+input(ds.DSSTDTC, yymmdd10.) as RFENDT format=yymmdd10. label="Subject Reference End Date",
+
+/* Planned Treatment Group */
+
+/*take the drug name dirctly from exposure*/
+
+
+
+/* Safety Population Flag */
+
+case when ex.TRTSDT is not missing then "Y" else "N" end as SAFFL length=1 label="Safety Population Flag"
+
+from SDTM.dm_final as dm
+left join work.ex_limits as ex on dm.USUBJID = ex.USUBJID
+left join SDTM.ds_final as ds on dm.USUBJID = ds.USUBJID;
+quit;
+
+
+title "ADaM ADSL: Including Treatment and Disposition Info";
+
+proc print data=ADaM.adsl noobs;
+
+var USUBJID TRT01P TRTSDT TRTEDT DSSTATUS RFENDT SAFFL;
+run;
+title;
+
+
+
+/* STEP 1: PREPARE DATA FOR MERGING */
+
+proc sort data=SDTM.ae_final out=ae_sorted; by USUBJID; run;
+
+proc sort data=ADaM.adsl out=adsl_sorted; by USUBJID; run;
+
+/* STEP 2: MERGE AE AND ADSL USING DATA STEP */
+
+data ADaM.adae;
+merge ae_sorted (in=a)
+adsl_sorted (in=b keep=USUBJID TRTSDT TRTEDT TRT01P SAFFL);
+by USUBJID;
+
+if a and b; /* Keep records that exist in both */
+
+attrib ASTDT length=8 format=yymmdd10. label="Analysis Start Date"
+TRTEMFL length=$1 label="Treatment Emergent Analysis Flag";
+
+/* Convert AE Start Date to Numeric */
+ASTDT = input(AESTDTC, ?? yymmdd10.);
+
+/* LOGIC FOR TRTEMFL:
+AE occurs on or after First Dose AND (before Last Dose + 30 days or any other rule) */
+if ASTDT ne . and TRTSDT ne . then do;
+if ASTDT >= TRTSDT then TRTEMFL = "Y";
+else TRTEMFL = "N";
+end;
+else TRTEMFL = "U"; /* Unknown if TRTSDT is missing */
+run;
+
+/* STEP 3: FINAL REPORT */
+
+title1 "Project: BEL-2026-041 - Human Medicine Study";
+title2 "ADaM ADAE: Treatment Emergent Analysis (TEAE)";
+
+proc print data=ADaM.adae noobs label;
+var USUBJID AETERM ASTDT TRTSDT TRTEDT TRTEMFL TRT01P;
+run;
+title;
+
+/* Table 1: Subject Disposition by Treatment Group */
+
+title "Table 1: Summary of Subject Disposition (Safety Population)";
+
+proc freq data=ADaM.adsl;
+/*we usedTRT01P with patients condition DSSTATUS*/
+
+tables TRT01P * DSSTATUS / norow nocol nopercent;
+run;
+
+/* Table 2: AE Severity by Treatment (Enhanced with Missing values) */
+
+title "Table 2: Adverse Events Severity by Treatment Group";
+proc freq data=ADaM.adae;
+
+tables TRT01P * AESEV / norow nocol nopercent missing;
+run;
+
+
+ods excel close;
+ods pdf close;
+
+%put NOTE: Project BEL-2026-041 is fully completed (Phases 1, 2, and 3).;
+
